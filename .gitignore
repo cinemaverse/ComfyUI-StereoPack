@@ -1,0 +1,21 @@
+# ComfyUI
+__pycache__/
+*.py[cod]
+*.log
+
+# ComfyUI outputs, if you point a workflow at this folder
+output/
+input/
+temp/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# training artifacts
+*.safetensors
+*.pth
+*.npz
+dataset/

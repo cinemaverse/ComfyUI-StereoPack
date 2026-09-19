@@ -1,0 +1,38 @@
+# musubi-tuner dataset config for a same-instant stereo LoRA -- STRIDE 3 (stage 2).
+#
+# Read ../docs/TRAIN_YOUR_OWN.md for the full recipe. Short version:
+#
+#   A pair must be EXACTLY one instant: frame 0 = right eye of instant t, frame 1 = left
+#   eye of the SAME instant t, frame 2 = right eye of instant t+stride. The clips are
+#   built by training/sbs_segments_to_dataset.py; this file only describes them to
+#   musubi-tuner.
+#
+#   Stage 1 uses --source-stride 1 (1/24 s per instant): the model learns the eye flip,
+#   but faithfully reproduces only ~0.34 px of action per instant, so scenes move in slow
+#   motion and high strength can satisfy "same instant" by FREEZING the scene.
+#   Stage 2 rebuilds the clips with --source-stride 3 (1/8 s per instant = real-time
+#   motion at 8 fps playback; dataset median per-instant motion 0.34 -> 3.66 px) and
+#   CONTINUES from a stage-1 checkpoint at half the learning rate.
+#
+#   Re-verify parity after building, with the stride you used:
+#       python tools/parity_check.py clips --dir <videos_dir> --stride 3
+#   It must report  R, L, R@+3.
+
+[general]
+resolution = [512, 512]
+caption_extension = ".txt"
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = false
+
+[[datasets]]
+# Absolute path to the folder of clips produced by sbs_segments_to_dataset.py.
+video_directory = "/path/to/dataset/videos"
+
+target_frames = [9]
+frame_extraction = "head"    # parity-safe: the first frame of each clip is the first pair
+frame_stride = 1             # MUST stay 1 -- the two eyes are ADJACENT frames.
+                             # The stride that changes pacing is a BUILDER argument
+                             # (--source-stride), not this.
+max_frames = 9               # must match target_frames
+source_fps = 16.0            # must be a float
