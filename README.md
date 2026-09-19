@@ -59,6 +59,7 @@ expects or adapt:
 models/loras/wan/StereoDepth_Low_I2V.safetensors  <- i2v LOW noise  (node 159)
 models/loras/wan/StereoDepth_High_I2V.safetensors    <- i2v HIGH noise (node 158)
 ```
+Download from here: https://civitai.com/models/2949659/real-stereo-depth-video-wan-22-i2v?modelVersionId=3340545
 
 ### Other models the workflow needs
 
