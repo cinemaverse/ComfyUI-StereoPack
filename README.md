@@ -115,27 +115,6 @@ models/loras/H3/H3_StereoDepth_FL2VA.safetensors
 ```
 
 
-### Other models the workflow needs
-
-| slot | file |
-|---|---|
-| UNET high / low | `wan/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors`, `wan/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` |
-| speed LoRA (4-step) | `wan/wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors` and its low-noise twin |
-| text encoder | `wan/umt5_xxl_fp8_e4m3fn_scaled.safetensors` |
-| VAE | `Wan2_1_VAE_fp32.safetensors` |
-| CLIP vision | `clip_vision_h.safetensors` |
-
-Sampler settings are the standard 4-step setup: 8 steps, cfg 1.0, euler / beta, split
-across the two noise stages (0–4 and 4–end). Four `LoraLoaderModelOnly` slots in the
-graph are **bypassed** placeholders for your own style LoRAs — un-bypass them (Ctrl+B)
-and point them at your files if you want to stack a look on top.
-
-Also required: [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)
-(`VHS_*` nodes) and [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes)
-(`PathchSageAttentionKJ`, `PreviewAny`).
-
----
-
 ## Verify your own output
 
 ### In the graph — the node measures it for you (2026-09-27)
