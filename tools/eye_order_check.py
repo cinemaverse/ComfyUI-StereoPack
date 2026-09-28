@@ -28,6 +28,17 @@ at +26 px, and a magnitude-ranked test then reports "[R|L]" for a pair that is
 depth mask when given one and refuses to give a verdict that violates the
 near/far magnitude ordering.
 
+RUNTIME EQUIVALENT (added 2026-09-27)
+------------------------------------
+This tool is the dataset/render-side authority on eye order. For a *rendered* clip you do not
+need to come here first: `Stereo Pair Frames + head trim / QC` returns `phase_ok`, the fraction
+of sampled pairs that agree on the eye order, and its `report` warns when that is below 1.00 --
+which is exactly the "the depth inverts somewhere in the clip" failure this tool diagnoses
+offline. `phase_ok = 1.00` on a clip whose `viewing` setting is as documented means the
+convention held for the whole clip; anything less, come here and check a pair properly.
+A second, independent runtime signal: a pair whose measured eye step is POSITIVE in the node's
+`report` is the opposite order to the trained one (the node's convention is negative).
+
 Usage
 -----
   # SBS clip (each frame already holds both eyes) + DA3 metric depth
