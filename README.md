@@ -68,7 +68,7 @@ folder into `custom_nodes`.
 
 ## Full pipeline — Wan 2.2 I2V with the same-instant LoRA
 
-`workflows/VideoWF_3D_Stereo_I2V.json` is the end-to-end graph: image → Wan 2.2 I2V
+`workflows/WAN_VideoWF_3D_Stereo_I2V.json` is the end-to-end graph: image → Wan 2.2 I2V
 (low+high noise) → Stereo Pair Frames + head trim / QC → SBS video.
 
 Set **`skip_first = 0`** on the pairing node. Wan clips measured so far are strong from frame 0
@@ -84,11 +84,36 @@ the node menu changed, to **Stereo Pair Frames + head trim / QC**.
 Two files, one for each Wan 2.2 noise stage. Put them in
 `ComfyUI/models/loras/wan/` **with these exact names**, which is what the workflow
 expects or adapt:
+https://civitai.red/models/2949659/real-stereo-depth-video-wan-22-i2v 
 
 ```
 models/loras/wan/StereoDepth_Low_I2V.safetensors  <- i2v LOW noise  (node 159)
 models/loras/wan/StereoDepth_High_I2V.safetensors    <- i2v HIGH noise (node 158)
 ```
+
+## Full pipeline — H3 Minimax FL2VA with the same-instant LoRA
+
+`workflows/H3_VideoWF_3D_Stereo_FL2VA.json` is the end-to-end graph: image → H3 Lora → Stereo Pair Frames + head trim / QC → SBS video.
+
+Set **`skip_first = 0`** on the pairing node. Wan clips measured so far are strong from frame 0
+(14.8, 17.4, 16.1 … px on the first pairs of the test render), so `auto_extend` trims nothing and
+the node is a no-op; the fixed default of 2 would have thrown away a good instant. The readout
+from that graph is `eye step -13.1 px = 1.70 % of width -- film class`, `phase 1.00`.
+
+Its **key is still `StereoPairFrames`**, so every saved graph opens unchanged — only the title in
+the node menu changed, to **Stereo Pair Frames + head trim / QC**.
+
+### The LoRA
+
+One file put it in
+`ComfyUI/models/loras/wan/` **with these exact names**, which is what the workflow
+expects or adapt:
+https://civitai.red/models/2969930/real-stereo-depth-video-h3-minimax
+
+```
+models/loras/H3/H3_StereoDepth_FL2VA.safetensors
+```
+
 
 ### Other models the workflow needs
 
