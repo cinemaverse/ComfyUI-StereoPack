@@ -21,6 +21,22 @@ EYE ORDER, as measured on real output: pairing `frame1 | frame2` reads as a CROS
 view, and `frame2 | frame1` is the one a headset needs. The default is therefore
 cross-eyed -- it is what the labels say, so they cannot be misread.
 
+As of 2026-09-30 `viewing` is a PROMISE, not an assumption, and it is kept PAIR BY PAIR -- with NO
+clip-level vote anywhere in the decision. Every pair is measured; the pairs that contradict the
+promise are swapped individually, and a pair is only acted on when its measurement is solid
+(`|step| >= 3 px` AND the rigid fit explains `>= 0.20` of its horizontal structure).
+
+The trust gate is the part that matters, and render 387 is why. There, 8 near-dominant opening
+pairs measured -9.8..-13.1 px (fits 0.01-0.13) while the far-dominant body measured +1.5..+7.7 px
+(fits 0.08-0.19): the sign tracked WHICH DEPTH LAYER dominated the gradient mask, not the eye
+order, at every pair in the clip. Any repair built on that sign -- a whole-clip swap, a majority
+vote, or an ungated per-pair swap -- inverted a group that was already correct. The clip was right
+as generated. So when nothing clears the bar the node now ships the clip UNCHANGED and says so in
+the report, instead of flipping its strongest disparity on a count of weaker pairs.
+
+`auto_honor` off means the trained order is assumed (the documented fallback), exactly as if
+`measure` were off.
+
 HEAD TRIM (2026-09-27). The opening frames of a generated clip are the weakest: the
 alternation has to establish itself before it reaches full strength, and a dead opening
 pair ships to the viewer as a mono instant. Measured on the project's renders (frame pairs
@@ -61,6 +77,8 @@ import numpy as np
 import torch
 
 _CAT = "Stereo"
+_MIN_PX = 3.0            # a pair under this carries no usable eye step
+_EXPL_MIN = 0.20         # fit quality a pair needs before its sign is trusted as an eye ORDER
 _VIEWING = ["cross-eyed  (left = frame 1, right = frame 2)",
             "parallel / headset  (left = frame 2, right = frame 1)"]
 _UNPAIRED = ["drop (leave it alone)", "black partner", "duplicate last frame"]
@@ -129,6 +147,19 @@ def _steps_for(images: torch.Tensor, idx, rng: int = 48) -> list:
     """Full-res eye step for the pair indices in `idx` (identical numbers to the project's tool)."""
     arr = _np_frames(images, idx)
     return [float(_global_shift(arr[2 * i], arr[2 * i + 1], rng=rng)[0]) for i in range(len(idx))]
+
+
+def _steps_quality_for(images: torch.Tensor, idx, rng: int = 48) -> list:
+    """Per-pair `(eye step, fit quality)` for the pair indices in `idx`.
+
+    The second number is `_global_shift`'s `explained` -- how much of the masked horizontal
+    structure the rigid shift accounts for -- and it is the trust signal for the order repair. A
+    large step with a fit near zero is a shift between two different depth layers, not an eye
+    separation (render 387: every pair measures 10 px with a fit of 0.01-0.19).
+    """
+    arr = _np_frames(images, idx)
+    return [(float(d), float(e)) for d, _, e in
+            (_global_shift(arr[2 * i], arr[2 * i + 1], rng=rng) for i in range(len(idx)))]
 
 
 def measure_eye_step(images: torch.Tensor, n_prefix: int = 12, n_spread: int = 12) -> dict:
@@ -282,7 +313,10 @@ class StereoPairFrames:
                 "tooltip": "Which eye order matches how you watch it. Measured on real "
                            "output: frame1|frame2 reads as CROSS-EYED, so that is the "
                            "default. A headset needs the halves swapped -- pick "
-                           "parallel / headset for that."}),
+                           "parallel / headset for that. With `measure` on, a whole-clip "
+                           "mirrored render is auto-swapped (one uniform swap) so the "
+                           "output ALWAYS matches this choice; without measurement the "
+                           "trained order is assumed."}),
             "unpaired_last": (_UNPAIRED, {
                 "tooltip": "What to do when the clip has an odd frame count, so the "
                            "final frame has no partner. 'drop' simply leaves it out."}),
@@ -313,14 +347,20 @@ class StereoPairFrames:
                            "you see the bad seed immediately instead of at the end of a watch. The "
                            "raw render is already saved by then; just change the seed and re-run."}),
             "phase_lock": ("BOOLEAN", {"default": False,
-                "tooltip": "OFF by default. Turns on an automatic eye-order repair: measure every "
-                           "pair and swap the halves of those whose order disagrees with the clip's "
-                           "majority. Tested on real renders and REJECTED as a default -- on a clip "
-                           "whose disparity is patchy (some pairs 6 px, others flat) every variant of "
-                           "the repair, even one restricted to the solid pairs, introduced visible "
-                           "disturbances for the viewer, while the untouched pairing read fine. "
-                           "The node now reports the inconsistency instead of acting on it: read "
-                           "`phase_ok` / the ramp line, and re-render on another seed."}),
+                "tooltip": "Legacy manual repair, kept as a fallback: the auto-honor already "
+                           "swaps the pairs that contradict `viewing`, pair by pair, whenever the "
+                           "measurement is trustworthy -- including when it deliberately swaps "
+                           "nothing because no pair measured cleanly. This only acts when the "
+                           "auto-honor is OFF (it is the old majority-relative rule, which is how "
+                           "render 387 got its opening inverted; prefer the auto-honor)."}),
+            "auto_honor": ("BOOLEAN", {"default": True,
+                "tooltip": "Keep the `viewing` promise by repairing the eye order PER PAIR: every "
+                           "pair is measured, and only the pairs that contradict the selected "
+                           "viewing are swapped -- there is no clip-level vote. A pair is only "
+                           "touched when its measurement is solid (>= 3 px step AND fit >= 0.20), "
+                           "so a clip whose sign follows near/far dominance instead of eye order "
+                           "(measured: render 387, fits 0.01-0.19) is shipped exactly as generated "
+                           "instead of being inverted. Off: the trained order is assumed."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "FLOAT", "FLOAT", "STRING", "STRING", "BOOLEAN")
@@ -331,7 +371,7 @@ class StereoPairFrames:
 
     def pair(self, images, viewing, unpaired_last, pad_to_even,
              skip_first=0, auto_extend=True, expected_min_px=3, measure=True, phase_lock=False,
-             reject_bad_seed=False):
+             reject_bad_seed=False, auto_honor=True):
         skip_first = int(skip_first)
         if skip_first % 2:
             raise ValueError("skip_first must be even (frame 0 of each pair = RIGHT eye); got %d"
@@ -381,8 +421,74 @@ class StereoPairFrames:
 
         L, R = (first, second) if _left_is_first(viewing) else (second, first)
 
+        # ------------------------------------------------------------------------------
+        # auto-honor (2026-09-30, trust-gated). `viewing` promises an output arrangement, so
+        # every pair is measured and the pairs that CONTRADICT that promise are swapped
+        # individually. Two rules, both learned on real output:
+        #
+        # 1. There is no clip-level vote anywhere. Which side is "wrong" is set by the
+        #    convention (negative = trained order, frame 0 = RIGHT eye; cross-eyed expects it,
+        #    parallel/headset expects its mirror), never by counting pairs. The count-based
+        #    version shipped a real regression: on render 387 the 8 opening pairs measured
+        #    -9.8..-13.1 px and 25 body pairs measured +3..+7 px, so the count flipped the 8 --
+        #    which were the correct ones. The user's own SBS outputs confirmed it twice, from
+        #    both sides: swapping the opening broke it (15:17, and again after that fix), and
+        #    swapping the body broke the body (17:17).
+        #
+        # 2. A pair is only acted on when the measurement is solid: |step| >= _MIN_PX AND the
+        #    rigid fit explains >= _EXPL_MIN of the horizontal structure. Below that the sign is
+        #    not the eye order -- on 387 EVERY pair measured ~10 px with a fit of 0.01-0.19, the
+        #    sign tracking which depth layer dominated the gradient mask (near-dominant opening
+        #    negative, far-dominant body positive) rather than any change of eye order. So when
+        #    nothing clears the bar the node ships the clip EXACTLY as generated and says so in
+        #    the report -- the plain frame-even|frame-odd pairing, which on 387 was the correct
+        #    output all along (confirmed by eye with `measure` off).
+        #
+        # `auto_honor = false` assumes the trained order instead (documented fallback), and the
+        # legacy `phase_lock` no longer runs when this path was measured -- otherwise it would
+        # re-apply the count rule through the back door.
+        flipped = False
+        auto_swapped = []
+        repair_note = ""
+        measured, trusted, pos, neg = [], [], [], []
+        if qc is not None and auto_honor and qc["steps"]:
+            measured = _steps_quality_for(trimmed, list(range(pairs)))
+            trusted = [(i, d) for i, (d, q) in enumerate(measured)
+                       if abs(d) >= _MIN_PX and q >= _EXPL_MIN]
+            pos = [i for i, d in trusted if d > 0]
+            neg = [i for i, d in trusted if d < 0]
+            # Cross-eyed expects the trained order (negative step, frame 0 = RIGHT eye);
+            # parallel/headset expects the mirror of it. The group that contradicts the selected
+            # `viewing` is therefore the opposite one -- chosen by convention, never by a count.
+            wrong = pos if _left_is_first(viewing) else neg
+            if not trusted:
+                best_q = max([q for _, q in measured] + [0.0])
+                repair_note = (
+                    "auto-honor SKIPPED -- nothing swapped: no pair measured cleanly enough to "
+                    "read an eye order from (need |step| >= %.0f px AND fit >= %.2f; best fit on "
+                    "this clip %.2f, %d pairs measured). The sign on content like this follows "
+                    "near/far dominance, not the eye order, so the clip ships EXACTLY as generated "
+                    "-- the plain frame-even|frame-odd pairing. If that reads the wrong way round, "
+                    "change `viewing`, not the pairing." % (_MIN_PX, _EXPL_MIN, best_q, len(measured)))
+            elif wrong:
+                auto_swapped = wrong
+                m = torch.zeros(pairs, dtype=torch.bool)
+                m[auto_swapped] = True
+                m = m.view(-1, 1, 1, 1)
+                L, R = torch.where(m, R, L), torch.where(m, L, R)
+                # a uniform mirror: every trusted pair is on one side and every one was swapped
+                flipped = bool(not (pos and neg) and len(wrong) == len(trusted))
+
         swapped, lock_note = 0, ""
-        if qc is not None and phase_lock and qc["phase_ok"] < 1.0:
+        # `auto_honor` (when on and measured) is the authoritative repair, INCLUDING when it
+        # abstained because nothing cleared the trust bar -- that abstain is a decision, not a
+        # gap to fill. Letting the legacy count-based lock run there is exactly how an already
+        # correct clip gets inverted (render 387: 8 strong trained pairs, 25 weak mirrored ones).
+        if (qc is not None and phase_lock and qc["phase_ok"] < 1.0 and not auto_swapped
+                and not (auto_honor and measured)):
+            # The auto-honor above already aligned the minority pairs to the majority, so
+            # phase_lock has nothing left to do (and re-running its mask would double-swap
+            # them straight back). Only run it when auto-honor did not act.
             # Gate: lock only when there is real disparity to lock ONTO, judged from the sampled
             # pairs, not from the whole-frame median. Two sampled pairs at >= 5 px means a real eye
             # step exists somewhere; a clip whose strongest sampled pair is 3-4 px (measured: render
@@ -422,9 +528,10 @@ class StereoPairFrames:
             step, phase = qc["median"], qc["phase_ok"]
             W = int(images.shape[2])
             bd, be = measure_bands(images, qc["band_idx"])
-            if swapped:
-                # the clip is now the mirror of what was measured for the inverted majority, so the
-                # reported field is negated -- printed and returned values must agree
+            if swapped or flipped or len(auto_swapped) > pairs // 2:
+                # the clip is now the mirror of what was measured (per-pair swap for an inverted
+                # minority, or a whole-clip auto-honor swap), so the reported field is negated --
+                # printed and returned values must agree
                 step, bd = -step, [-x for x in bd]
             # "present in PARTS" is reserved for the case where the whole-frame number UNDERSTATES
             # the clip: a strong band or a strong opening while the median says nothing (measured on
@@ -444,18 +551,33 @@ class StereoPairFrames:
             # in the trained order (negative, frame 0 = RIGHT eye) and the body mirrored; the next
             # seed came out mirrored for the WHOLE clip (+7.5 px opening, SBS 139). A whole-clip
             # mirror is fixed by `viewing` -- a uniform swap, with nothing per-pair to disturb.
-            _strong = [x for x in qc["steps"] if abs(x) >= 3.0]
             _mixed = _mixed_order(qc["prefix"], qc["steps"])
-            order = 0 if not _strong else (1 if sum(_strong) > 0 else -1)
+            # Clip order from the TRUSTED pairs only, and no vote: a sign set that disagrees (or
+            # that no pair carries cleanly) does not identify a clip order, it identifies content
+            # the rigid fit cannot anchor -- render 387, where the same eye order measured negative
+            # on the near-dominant opening and positive on the far-dominant body.
+            if auto_honor and measured:
+                order = -1 if (neg and not pos) else (1 if (pos and not neg) else 0)
+            else:
+                _pos = [x for x in qc["steps"] if x >= 3.0]
+                _neg = [x for x in qc["steps"] if x <= -3.0]
+                order = 0 if not (_pos or _neg) else (1 if len(_pos) > len(_neg) else -1)
             order_note = ("clip order: MIXED -- this render is not in one eye order (the ramp "
-                          "line shows which pairs disagree); no `viewing` setting can fix a mix, "
-                          "so re-render on another seed") if _mixed else {
-                1: ("clip order: PARALLEL (frame 0 = LEFT eye) -- for cross-eyed viewing "
-                              "set `viewing` = 'parallel / headset'; the 'cross-eyed' setting "
-                              "assumes the opposite order"),
+                          "line shows which pairs disagree); the pairs that contradict the "
+                          "selected `viewing` were swapped pair by pair, so the output is "
+                          "consistent wherever the order is measurable. Re-render on another seed "
+                          "if the disparity itself is patchy") if _mixed else {
+                1: ("clip order: PARALLEL (frame 0 = LEFT eye) -- the render came out MIRRORED "
+                    "relative to the trained convention" + (
+                        "; the pairs that contradict `viewing` were swapped pair by pair"
+                        if (auto_swapped or swapped) else
+                        "; nothing was swapped (`auto_honor` / `phase_lock` off), so change "
+                        "`viewing` if it reads the wrong way round")),
                           -1: ("clip order: cross-eyed (frame 0 = RIGHT eye) -- the default `viewing` "
                                "setting is the right one for this clip"),
-                0: "clip order: undetermined (no pair reaches 3 px)"}[order]
+                0: ("clip order: undetermined -- the pairs that measured cleanly do not agree on "
+                    "one order (or none cleared the %.0f px / %.2f fit bar), so nothing was "
+                    "re-arranged and the clip is exactly as generated" % (_MIN_PX, _EXPL_MIN))}[order]
             sampled = qc["steps"]
             strength_note = ("strongest sampled pair %.1f px; %d of %d sampled under 1 px"
                              % (max([abs(x) for x in sampled] + [0.0]),
@@ -467,16 +589,35 @@ class StereoPairFrames:
             elif qc["prefix"] and abs(qc["prefix"][0]) < float(expected_min_px):
                 note.append("WARNING: the opening pair is still %.1f px (< %d) -- raise skip_first"
                             % (qc["prefix"][0], int(expected_min_px)))
-            if phase and phase < 1.0 and not swapped:
+            if phase and phase < 1.0 and not swapped and not auto_swapped:
                 note.append("WARNING: eye order is not consistent (%.0f%% of pairs share the "
                             "dominant sign) -- this render changes eye order part-way through. "
-                            "Nothing was re-arranged (phase_lock is off): watch it, and if the "
+                            "Nothing was re-arranged (no strong minority detected): watch it, and if the "
                             "reversal bothers you, re-render on another seed rather than letting "
                             "the node swap halves." % (phase * 100))
+            if auto_swapped and flipped:
+                note.append("auto-honor: this render came out MIRRORED as a whole clip (all %d "
+                            "trusted pairs measure the order opposite the selected `viewing`), so "
+                            "every pair was swapped and the output reads as `viewing` says. "
+                            "Swapped: %d-%d" % (len(auto_swapped), auto_swapped[0],
+                                                auto_swapped[-1]))
+            elif auto_swapped:
+                note.append("auto-honor (per-pair): %d of %d pairs contradict the selected "
+                            "`viewing` (%d pairs measured cleanly). Swapped ONLY those, pair by "
+                            "pair; every other pair is exactly as generated. Swapped: %s"
+                            % (len(auto_swapped), pairs, len(trusted),
+                               ", ".join(str(k) for k in auto_swapped[:16]) + (
+                                   " ..." if len(auto_swapped) > 16 else "")))
+            if repair_note:
+                note.append(repair_note)
             if swapped:
                 note.append("phase_lock: the clip's own majority order is %s; swapped the halves of "
                             "%d of %d pairs so the whole clip agrees with it (weak pairs left as "
                             "generated)" % (lock_sign, swapped, pairs))
+            if qc is not None and trusted and not auto_swapped:
+                note.append("order repair: nothing to swap -- every pair that measured cleanly "
+                            "already matches the selected `viewing` (%d of %d pairs trusted)"
+                            % (len(trusted), pairs))
             if lock_note:
                 note.append(lock_note)
             # ----------------------------------------------------------------------------------
@@ -496,8 +637,11 @@ class StereoPairFrames:
                 verdict = "REJECT - the two eyes are WARPED against each other (bands disagree in sign)"
             elif flat:
                 verdict = "REJECT - NO STEREO (no band and fewer than two opening pairs reach 5 px)"
-            elif _mixed:
+            elif _mixed and not auto_swapped and not repair_note:
                 verdict = "REJECT - MIXED EYE ORDER (the render changes order part-way through)"
+            elif _mixed and auto_swapped:
+                verdict = ("OK (REPAIRED) - the render changed eye order part-way through; "
+                           "the minority pairs were swapped pair-by-pair so the output is consistent")
             elif n_flat > len(qc["steps"]) // 3 or bandv.startswith("incoherent") or phase < 0.999:
                 verdict = ("OK (PATCHY) - one consistent eye order where the disparity is strong; the "
                            "rest is weak or flat (%s). Weak pairs reading the other way are failed "

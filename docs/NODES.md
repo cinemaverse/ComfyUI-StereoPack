@@ -59,7 +59,8 @@ of itself. Also drops the weak opening frames and measures the result (see
 | `expected_min_px` | `3` | a pair below this counts as weak for `auto_extend`, and the report warns about it | `3`. Film class starts around 10 px, so 3 px is already shallow; raise it only if you want a stricter opening |
 | `measure` | `True` | measures the eye step / phase / bands for the QC outputs (~3–6 s per run) | `True` while you are dialling in a model; `False` for batch rendering once you trust it |
 | `reject_bad_seed` | `False` | when on, a render that is MIXED / WARPED / has no stereo makes this node **error out** — red node, graph stops, message says *CHANGE THE SEED AND TRY AGAIN* with the opening pairs and bands as evidence | `False` normally; `True` when you are hunting for a good seed and would rather be told immediately than discover it while watching |
-| `phase_lock` | `True` | when the clip's eye order is inconsistent (some pairs mirrored), measures every pair and swaps the halves of the inverted ones, so the whole clip is in the trained order | **leave `True`** — it costs an extra pass only on clips that fail the check, and those are the clips you cannot watch |
+| `auto_honor` | `True` | keeps the `viewing` promise **pair by pair**: every pair is measured and only the pairs that contradict `viewing` are swapped — no clip-level vote. A pair is only touched when its measurement is solid (`>= 3 px` step **and** `>= 0.20` fit); if nothing clears the bar, nothing is swapped and the report says `auto-honor SKIPPED` | **leave `True`**. This is what makes `viewing` true regardless of how the render came out; set `False` only if you want the raw generated order untouched |
+| `phase_lock` | `False` | legacy fallback repair: measures every pair and swaps the halves that disagree with the clip's own majority order | leave `False`; `auto_honor` does this better (it never uses a majority, and it never acts on an untrustworthy measurement) |
 
 ### Outputs
 
@@ -154,7 +155,31 @@ first 12 pairs (the ramp): -14.8 -17.4 -14.3 -15.5 -18.0 -17.1 -18.5 -15.3 -18.0
 sampled steps: -14.8 -18.5 -12.4 -17.9 -15.6 -13.3 -15.3 -13.2 -16.8 -18.0 -17.4 -15.8
 ```
 
-### Eye order that flips mid-clip (`phase_lock`)
+### Order repair is per-pair and trust-gated (`auto_honor`)
+
+The `viewing` widget is a promise: the output is arranged the way the label says. `auto_honor` keeps
+it, and it decides **pair by pair — there is no clip-level vote anywhere in the decision**:
+
+* every pair is measured: `|step|`, and the rigid fit's `explained` (how much of the masked
+  horizontal structure the shift accounts for);
+* a pair is only acted on when the measurement is solid: **`|step| >= 3 px` AND `explained >= 0.20`**;
+* the pairs that contradict the selected `viewing` are swapped individually, and the report names
+  their indices (`auto-honor (per-pair): 8 of 62 pairs … Swapped: 0, 1, 2, 3, 4, 5, 6, 7`);
+* when **no** pair clears the bar, **nothing is swapped** and the report says `auto-honor SKIPPED`.
+
+That last case is the important one. On render 387 all 62 pairs measured around 10 px with a fit of
+0.01–0.19: the sign tracked **which depth layer dominated the gradient mask** — near-dominant opening
+negative, far-dominant body positive — not the eye order. Every rule built on that sign (a
+whole-clip swap, a majority vote, an ungated per-pair swap) inverted a group that was already
+correct, and the clip exactly as generated was the right one, confirmed by eye with `measure` off.
+The gate makes the node abstain instead of guessing; `auto_honor = false` turns the mechanism off
+entirely and the trained order is assumed.
+
+Regression test: `tools/order_repair_selftest.py` — the real 387 clip must ship unswapped, plus
+synthetic controls for the trained, mirrored and mixed cases, including one where the mirrored side
+is the majority (the case a count gets wrong).
+
+### Eye order that flips mid-clip (`phase_lock`, legacy)
 
 A render can break the eye order part-way through, which the viewer sees as the depth snapping from
 cross-eyed to parallel a second or two in. Measured on one 1376×768 render:

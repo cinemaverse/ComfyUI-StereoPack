@@ -9,6 +9,56 @@ ComfyUI).
 
 ---
 
+## What's new — order repair: per-pair, trust-gated, no vote
+
+**The auto-honor no longer counts anything.** Every pair is measured, and a pair is only acted on
+when the measurement is solid — `|step| >= 3 px` **and** the rigid fit explains `>= 0.20` of its
+horizontal structure. The pairs that contradict the selected `viewing` are swapped individually, and
+the report names their indices.
+
+When **no** pair clears the bar the node now **ships the clip exactly as generated** and says
+`auto-honor SKIPPED`. That is not a fallback, it is the fix for a real regression: on render 387 all
+62 pairs measured around 10 px with a fit of 0.01–0.19, because the sign tracked which depth layer
+dominated the gradient mask (near-dominant opening → negative, far-dominant body → positive) and not
+the eye order. Every rule built on that sign — whole-clip swap, majority vote, ungated per-pair swap
+— inverted a group that was already correct; the clip as generated was the right one (confirmed by
+eye with `measure` off). New widget **`auto_honor`** (default on) turns the whole mechanism off;
+`measure = off` remains the flat fallback (trained order assumed).
+
+Regression test: `tools/order_repair_selftest.py` (run it with ComfyUI's embedded interpreter) — the
+real 387 clip must come out unswapped, plus synthetic controls for the trained, mirrored and mixed
+cases, including one where the mirrored side is the *majority* (the case a count picks wrong).
+
+## What's new — 2026-09-30
+
+**The auto-honor is now per-pair, not per-clip.** Render 387 (and its twin 386) came out with the
+opening pairs mirrored and the body trained — the clip changes eye order part-way through. A
+whole-clip vote can never fix that: the uniform swap just moved the error from the opening to the
+body ("first frames fixed, rest broken" — reported by the user on the actual SBS outputs). The
+node now measures **every pair** individually with `measure` on:
+- uniform mirror (all strong pairs positive) → one uniform swap, as before;
+- mid-clip order change (both signs carry ≥ 3 px) → only the **minority pairs** are swapped, pair
+  by pair, so the change is caught wherever it happens; the verdict reads `OK (REPAIRED)` when the
+  clip was mixed and is now consistent;
+- weak pairs (< 3 px) are left alone — their sign is noise and their depth invisible.
+`phase_lock` is now a legacy no-op when the auto-honor already acted (avoids double-swapping).
+
+**Superseded** by the entry above: the "minority pairs" rule below is gone. The repair is now chosen
+by convention (which side contradicts `viewing`) and gated by measurement quality, never by a count
+of pairs — on render 387 the count is exactly what picked the wrong group.
+
+## What's new — 2026-09-29
+
+**`viewing` is now a promise, not an assumption.** A render that comes out mirrored as a whole
+clip (measured dominant order opposite the trained convention — e.g. render 387, which
+`h3_verify_pair.py` reports as `frame0 = LEFT (REVERSED)`) used to silently ship the *opposite*
+arrangement to the one selected: cross-eyed selected, parallel output. With `measure` on, the
+node now detects the mirror and swaps every pair uniformly, so the output always reads the way
+`viewing` says. The dominant-order vote is a **count majority of strong sampled pairs, not a
+sum** — the sum is dominated by one strong opening pair and misread 387's weak mirrored body.
+The swap is reported as an `auto-honor` note. Without measurement the trained order is assumed
+(documented fallback).
+
 ## What's new — 2026-09-27
 
 **`Stereo Pair Frames + head trim / QC` gained a head trim, a measurement, and an eye-order repair.**
@@ -68,7 +118,7 @@ folder into `custom_nodes`.
 
 ## Full pipeline — Wan 2.2 I2V with the same-instant LoRA
 
-`workflows/WAN_VideoWF_3D_Stereo_I2V.json` is the end-to-end graph: image → Wan 2.2 I2V
+`workflows/VideoWF_3D_Stereo_I2V.json` is the end-to-end graph: image → Wan 2.2 I2V
 (low+high noise) → Stereo Pair Frames + head trim / QC → SBS video.
 
 Set **`skip_first = 0`** on the pairing node. Wan clips measured so far are strong from frame 0
@@ -84,36 +134,32 @@ the node menu changed, to **Stereo Pair Frames + head trim / QC**.
 Two files, one for each Wan 2.2 noise stage. Put them in
 `ComfyUI/models/loras/wan/` **with these exact names**, which is what the workflow
 expects or adapt:
-https://civitai.red/models/2949659/real-stereo-depth-video-wan-22-i2v 
 
 ```
 models/loras/wan/StereoDepth_Low_I2V.safetensors  <- i2v LOW noise  (node 159)
 models/loras/wan/StereoDepth_High_I2V.safetensors    <- i2v HIGH noise (node 158)
 ```
 
-## Full pipeline — H3 Minimax FL2VA with the same-instant LoRA
+### Other models the workflow needs
 
-`workflows/H3_VideoWF_3D_Stereo_FL2VA.json` is the end-to-end graph: image → H3 Lora → Stereo Pair Frames + head trim / QC → SBS video.
+| slot | file |
+|---|---|
+| UNET high / low | `wan/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors`, `wan/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` |
+| speed LoRA (4-step) | `wan/wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors` and its low-noise twin |
+| text encoder | `wan/umt5_xxl_fp8_e4m3fn_scaled.safetensors` |
+| VAE | `Wan2_1_VAE_fp32.safetensors` |
+| CLIP vision | `clip_vision_h.safetensors` |
 
-Set **`skip_first = 0`** on the pairing node. Wan clips measured so far are strong from frame 0
-(14.8, 17.4, 16.1 … px on the first pairs of the test render), so `auto_extend` trims nothing and
-the node is a no-op; the fixed default of 2 would have thrown away a good instant. The readout
-from that graph is `eye step -13.1 px = 1.70 % of width -- film class`, `phase 1.00`.
+Sampler settings are the standard 4-step setup: 8 steps, cfg 1.0, euler / beta, split
+across the two noise stages (0–4 and 4–end). Four `LoraLoaderModelOnly` slots in the
+graph are **bypassed** placeholders for your own style LoRAs — un-bypass them (Ctrl+B)
+and point them at your files if you want to stack a look on top.
 
-Its **key is still `StereoPairFrames`**, so every saved graph opens unchanged — only the title in
-the node menu changed, to **Stereo Pair Frames + head trim / QC**.
+Also required: [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)
+(`VHS_*` nodes) and [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes)
+(`PathchSageAttentionKJ`, `PreviewAny`).
 
-### The LoRA
-
-One file put it in
-`ComfyUI/models/loras/wan/` **with these exact names**, which is what the workflow
-expects or adapt:
-https://civitai.red/models/2969930/real-stereo-depth-video-h3-minimax
-
-```
-models/loras/H3/H3_StereoDepth_FL2VA.safetensors
-```
-
+---
 
 ## Verify your own output
 
