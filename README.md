@@ -9,6 +9,82 @@ ComfyUI).
 
 ---
 
+## What's new — `flat_only`: the stabilizer's cleanup without the quality cost
+
+**`Stereo Stabilize` gained two widgets, and if you ignore them you get the previous node
+bit-for-bit.** `flat_only` (0–100, default `0`) and `flat_feather` (1–31, default `9`) restrict the
+temporal median to the parts of the frame that have no edge to smear — which is where its quality
+cost was coming from.
+
+The difference, exactly:
+
+| | before | now |
+|---|---|---|
+| inputs | `sbs`, `radius`, `level`, `max_frames`, `check_stereo` | the same, plus `flat_only` and `flat_feather` — **appended**, so a saved graph still resolves |
+| output | `median(level(eye))`, every pixel | `where(mask, median(level(eye)), level(eye))` |
+| `flat_only = 0` | — | **the old code path, bit-identical output** |
+| `flat_only = N` | — | a static mask: the flattest N % of the frame by the clip's own median gradient (≤ 12 sampled frames, blurred by `flat_feather`, thresholded). Inside → bit-identical to the un-gated median; outside → bit-identical to the level-corrected input |
+| report | `boil`, `detail` | the same two numbers, plus a `flat_only` line and a new **STRUCTURE** line |
+
+Both "bit-identical" claims are checked rather than asserted in prose: `tools/flat_gate_check.py`
+compares the node's output against the un-gated median and against the input, and fails loudly if
+either moves. The mask is built once per run from the clip's median gradient — never per frame,
+because a per-frame mask flickers at its own boundary and that flicker is worse than the boil.
+Only the median is gated: the exposure fix is one gain + offset per frame, so it costs no detail
+anywhere and stays global.
+
+**`STRUCTURE` is the number to read, not `detail`.** The existing `detail` figure is a per-frame
+Laplacian variance, so the boil it has just removed counts as detail lost — it overstates the cost.
+`STRUCTURE` is the same measure on the clip's **temporal mean**, where the boil averages out: it
+moves only when something real was eaten. Measured through the node on a real 62-pair H3 render
+(1248×1664 per eye, `radius 4`):
+
+| `flat_only` | covers | boil, whole frame | boil inside the gate | detail per frame | STRUCTURE |
+|---|---|---|---|---|---|
+| `0` | 100 % | 8.63 → 7.02 (−19 %) | 8.63 → 7.02 | 369.7 → 299.4 (**−19 %**) | 109.8 → 135.9 |
+| `60` | 60 % | 8.63 → 7.80 (−10 %) | 4.80 → 3.46 (**−28 %**) | 369.7 → 378.5 (**+2 %**) | 109.8 → 112.2 |
+| `85` | 85 % | 8.63 → 7.42 (−14 %) | 6.41 → 4.94 (−23 %) | 369.7 → 367.7 (**−1 %**) | 109.8 → 114.8 |
+
+The cleanup inside the gate is the same cleanup; what disappears is the bill.
+
+**Picking the radius — measure the motion, do not guess it.** `pair_validity.py` prints the
+instant motion from your own output (`INSTANT`, px per pair). On the H3 12 fps render above it is
+only 0.41–0.45 px/pair, so the wide window is safe; the sweep measured through the node at
+`flat_only 60` is:
+
+| `radius` | boil inside the gate | boil, whole frame | STRUCTURE |
+|---|---|---|---|
+| `0` (level fix only) | 4.80 → 4.52 (−6 %) | 8.63 → 8.56 | flat |
+| `1` | 4.80 → 4.19 (−13 %) | 8.63 → 8.37 (−3 %) | +1 % |
+| `2` | 4.80 → 3.88 (−19 %) | 8.63 → 8.20 (−5 %) | +2 % |
+| **`4`** | 4.80 → 3.46 (**−28 %**) | 8.63 → 7.18 (−10 %) | +2 % |
+
+```
+Stereo Stabilize    radius 4 | level 1.0 | max_frames 0 | check_stereo True
+                    flat_only 60 | flat_feather 9
+```
+
+Use `radius 1` instead as soon as the footage really moves — that is the pack's documented motion
+cliff, and the gate is what keeps it cheap there. `radius 0` + `flat_only 0` is a pass-through, for
+A/B against the un-stabilised clip.
+
+**How much boil a clip has is a property of the clip, not of the node.** The −23 … −51 % table in
+[docs/NODES.md](docs/NODES.md) was measured on an 8 fps Wan render; this 12 fps H3 one carries less
+that the median can remove, and the same node reads −19 % un-gated at radius 4 (−10 % on the whole
+frame with the gate open on only the flat 60 %). The gate changes the *cost*, not the amount of
+sizzle in the source.
+
+Re-run the evidence on your own output — it takes a folder of side-by-side pair images (extract
+them from the output video, or point it at a `SaveImage` folder):
+
+```bash
+python tools/flat_gate_check.py --dir <folder of SBS pair images> --radius 4 --gates 0,60,85
+```
+
+**Compatibility:** nothing else about the node changed — `radius`, `level`, `check_stereo` and
+`max_frames` behave exactly as before, and an existing graph opens with `flat_only = 0` and produces
+the same pixels it did. Set `flat_only 60` to switch the gate on.
+
 ## What's new — order repair: per-pair, trust-gated, no vote
 
 **The auto-honor no longer counts anything.** Every pair is measured, and a pair is only acted on
@@ -95,7 +171,7 @@ stabilizer radius that silently freezes moving footage).
 | **Split Stereo Pair -> batch of 2** | `eyes` | Same, as a batch of 2 (for two-image nodes). |
 | **Join Stereo Pair (left + right -> SBS)** | `image` | Two eye images → one SBS image (resizes the right eye if the sizes differ). |
 | **Swap Stereo Pair (\|L\|R\| <-> \|R\|L\|)** | `image` | Flips the halves — fix a crossed pair, or switch between headset and cross-eyed. |
-| **Stereo Stabilize (temporal median, per eye)** | `sbs`, `report`, `pairs` | Temporal median per eye removes the per-pixel sizzle ("boil"); also fixes per-frame exposure pulsing. Re-measures the disparity before/after and reports it. |
+| **Stereo Stabilize (temporal median, per eye)** | `sbs`, `report`, `pairs` | Temporal median per eye removes the per-pixel sizzle ("boil"); also fixes per-frame exposure pulsing. `flat_only` gates the median to the flat parts of the frame, so the cleanup costs no measurable detail. Re-measures the disparity before/after and reports it. |
 | **Stereo Depth Scale (disparity, motion-safe)** | `sbs`, `report`, `spread_before_pct`, `spread_after_pct` | Scales — or auto-matches — the depth of an SBS pair by moving the two eyes' content apart symmetrically. No depth map needed, and instant-to-instant motion is untouched. See below. |
 
 
@@ -118,8 +194,11 @@ folder into `custom_nodes`.
 
 ## Full pipeline — Wan 2.2 I2V with the same-instant LoRA
 
-`workflows/VideoWF_3D_Stereo_I2V.json` is the end-to-end graph: image → Wan 2.2 I2V
-(low+high noise) → Stereo Pair Frames + head trim / QC → SBS video.
+`workflows/WAN_VideoWF_3D_Stereo_I2V.json` is the end-to-end graph: image → Wan 2.2 I2V
+(low+high noise) → Stereo Pair Frames + head trim / QC → **Stereo Stabilize** → SBS video. The
+stabilizer is already wired in (`radius 1`, `flat_only 60` — the conservative, motion-keeping end);
+the H3 graph below ships `radius 4`, which is what that pipeline's own output measured. How to pick
+the radius from your own clip is in the `flat_only` entry above.
 
 Set **`skip_first = 0`** on the pairing node. Wan clips measured so far are strong from frame 0
 (14.8, 17.4, 16.1 … px on the first pairs of the test render), so `auto_extend` trims nothing and
@@ -128,6 +207,14 @@ from that graph is `eye step -13.1 px = 1.70 % of width -- film class`, `phase 1
 
 Its **key is still `StereoPairFrames`**, so every saved graph opens unchanged — only the title in
 the node menu changed, to **Stereo Pair Frames + head trim / QC**.
+
+`workflows/H3_VideoWF_3D_Stereo_FL2VA.json` is the same chain for MiniMax H3 (image → H3 video →
+Get Video Components → Stereo Pair Frames + head trim / QC → **Stereo Stabilize** → Video Combine),
+and it is the graph the `flat_only` figures above were measured on — it ships `radius 4`,
+`flat_only 60`. One thing is specific to this pair-rate pipeline: the
+video combine's `frame_rate` must be **half the source clip's**, because two source frames make one
+pair — at the source rate the pair rate doubles and the flicker doubles with it, which halves
+whatever the stabilizer can do.
 
 ### The LoRA
 
@@ -251,6 +338,7 @@ so the decision is visible rather than silent.
 | *did the eye order hold for the whole clip?* | the node (`phase_ok`) | fraction of pairs agreeing on the order; < 1.00 means the eyes swap mid-clip |
 | *how much does the depth vary across the frame?* | `tools/pair_validity.py` (`spread`) | p95–p5 of the per-pixel disparity |
 | *is the pair real at all?* | `tools/pair_validity.py` (`warp`) | residual after warping one half onto the other, with a REAL PAIR / WEAK / NOT A PAIR verdict |
+| *does the stabilizer's cleanup cost any quality?* | `tools/flat_gate_check.py` | boil and STRUCTURE per `flat_only` value, plus the two bit-identical contracts (un-gated median inside the gate, untouched input outside it) |
 | *is the eye convention right on a saved dataset or extracted clip?* | `tools/parity_check.py`, `tools/eye_order_check.py` | dataset-side checks, run offline |
 
 **These numbers are not interchangeable, and comparing them without knowing why is confusing.**
@@ -279,6 +367,7 @@ Node packs rarely ship evidence that a claim is true. This one does:
 ```bash
 python tools/pair_validity.py --dir "ComfyUI/output/Stereo" --runs
 python tools/pair_validity.py --file 3722
+python tools/flat_gate_check.py --dir <folder of SBS pair images> --radius 4 --gates 0,60,85
 ```
 
 It reports, per run: the disparity **spread** (in px and as % of the eye width -- how much the

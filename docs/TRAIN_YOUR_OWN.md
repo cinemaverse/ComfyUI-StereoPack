@@ -107,8 +107,10 @@ Do not mix strides within one dataset.
 
 ## Accept it with measurements, not vibes
 
-Generate a clip through `workflows/03_i2v_sameinstant_full.json` at strength 1.0/1.0,
-then:
+Generate a clip through `workflows/WAN_VideoWF_3D_Stereo_I2V.json` at strength 1.0/1.0
+(the SBS branch of that graph runs through **Stereo Stabilize**; set its `radius` to `0` or bypass
+the node while judging a fresh checkpoint, so the stabilizer's boil removal does not flatter the
+verdict), then:
 
 ```bash
 python tools/pair_validity.py --dir <ComfyUI>/output/Stereo --runs

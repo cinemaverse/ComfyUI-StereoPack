@@ -282,6 +282,8 @@ the node re-measures it and reports if it did.
 | `level` | `1.0` | how much of the per-frame exposure/luma correction to apply; removed the pulsing (level drift sd 0.93 → 0.11) at no measurable cost. Per eye, clamped to ±3% | `1.0` |
 | `max_frames` | `0` | `0` = process all pairs; truncate for a quick look | `0`, or a small number while testing |
 | `check_stereo` | `True` | re-measures the disparity before and after and reports it — the check that per-eye filtering really is order-preserving | `True` |
+| `flat_only` | `0` | `0` = filter every pixel (the original behaviour). Above 0 = filter only the flattest N% of pixels and leave the rest **bit-identical to the input** | `0` for maximum cleanup; **`60`–`85` for the same cleanup without the quality cost** — see below |
+| `flat_feather` | `9` | blur applied to the clip's gradient map before it is thresholded, in pixels (odd). `1` = a hard boundary; larger = softer, so the boundary itself cannot read as an edge. Only used when `flat_only > 0` | `9`. Lower it only if you can still see the boundary |
 
 ### Outputs
 
@@ -313,6 +315,38 @@ so it gets smeared away.
 > **Rule: `radius = 1` when things move, `4–5` only on locked-off or slow shots.**
 > Verify with `tools/pair_validity.py` — it reports instant motion straight from the
 > output. If the motion number drops, your radius is too high.
+
+### The gate: the same cleanup without the quality cost
+
+The median is the only thing that touches the boil, but filtering **every** pixel is what
+costs detail — at an edge it can pick a tap from a neighbouring instant and smear it.
+`flat_only` filters only where there is no edge to smear. Measured through the node on a real
+62-pair clip (1248×1664 per eye, `radius 4`), with `tools/flat_gate_check.py`:
+
+| `flat_only` | covers | boil (whole frame) | boil inside the gate | detail per frame | structure |
+|---|---|---|---|---|---|
+| `0` (everything) | 100% | 8.63 → 7.02 (−19%) | 8.63 → 7.02 | 369.7 → 299.4 (**−19%**) | 109.8 → 135.9 |
+| `60` | 60% | 8.63 → 7.80 (−10%) | 4.80 → 3.46 (**−28%**) | 369.7 → 378.5 (**+2%**) | 109.8 → 112.2 |
+| `85` | 85% | 8.63 → 7.42 (−14%) | 6.41 → 4.94 (−23%) | 369.7 → 367.7 (**−1%**) | 109.8 → 114.8 |
+
+`detail per frame` is the number the node prints, and most of what it "loses" is the boil it
+has just removed — so it overstates the cost. `structure` is the same measure on the clip's
+**temporal mean**, where the boil averages out: that one moves only if something real was
+eaten, and it never drops. The gate is exact in both directions — inside the mask the output
+is bit-identical to the ungated median, outside it is bit-identical to the input — so the only
+decision `flat_only` makes is **how much of the frame gets the cleanup**. The cleanup itself
+is the same node.
+
+The mask is built once per run, from the clip's own median gradient (never per frame, because
+a per-frame mask flickers at the boundary and that flicker is worse than the boil it removes),
+and blurred by `flat_feather` before thresholding.
+
+Re-run the check on your own output — it also asserts both bit-identical contracts, so it
+fails loudly if a future change breaks them:
+
+```bash
+python tools/flat_gate_check.py --dir <folder of SBS pair images> --radius 4 --gates 0,60,85
+```
 
 ---
 
@@ -387,7 +421,7 @@ to `ComfyUI/user/comfyui.log` on every run, so `grep "\[StereoDepthScale\]"` wor
 
 ```
 Load Video → Stereo Pair Frames + head trim / QC (defaults)
-           → Stereo Stabilize   (radius 1 if anything moves, else 4)
+           → Stereo Stabilize   (radius 1 if anything moves, else 4; flat_only 60)
            → Stereo Depth Scale (mode = match, target_spread_pct = 1.35)
            → Save Image / Video Combine
 ```
@@ -401,7 +435,8 @@ compare: that is one whole latent token on a 4x-temporal VAE, and it is the stru
 ```
 ... → Stereo Pair Frames + head trim / QC (defaults: skip_first 0, auto_extend on, measure on)
     → Stereo Depth Scale (mode = match, target_spread_pct = 1.35)
-    → Stereo Stabilize   (radius 1 for moving scenes)
+    → Stereo Stabilize   (radius 1 for moving scenes; flat_only 60 if you want the
+                          cleanup without paying detail for it)
     → Save Image / Video Combine
 ```
 
